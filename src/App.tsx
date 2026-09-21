@@ -17,11 +17,12 @@ import {
 import { supabase, supabaseConfigured } from './lib/supabase'
 
 type AuthMode = 'login' | 'signup'
-type Page = 'dashboard' | 'licenses' | 'customers' | 'activation'
+type Page = 'dashboard' | 'licenses' | 'customers' | 'plans' | 'history' | 'activation'
 
 type DashboardCounts = {
   active: number
   expired: number
+  expiring: number
   blocked: number
   customers: number
   devices: number
@@ -59,6 +60,13 @@ type Plan = {
   duration_days: number | null
   max_devices: number
   is_lifetime: boolean
+  price_cents: number | null
+  is_active: boolean
+}
+
+type GlobalEvent = LicenseEvent & {
+  customers?: { name: string } | null
+  licenses?: { license_key_last4: string } | null
 }
 
 type License = {
@@ -78,6 +86,7 @@ type License = {
 const emptyCounts: DashboardCounts = {
   active: 0,
   expired: 0,
+  expiring: 0,
   blocked: 0,
   customers: 0,
   devices: 0,
@@ -175,6 +184,12 @@ export default function App() {
     serverTime: string
   } | null>(null)
   const [testBusy, setTestBusy] = useState(false)
+  const [globalEvents, setGlobalEvents] = useState<GlobalEvent[]>([])
+  const [planName, setPlanName] = useState('')
+  const [planDays, setPlanDays] = useState(30)
+  const [planDevices, setPlanDevices] = useState(1)
+  const [planLifetime, setPlanLifetime] = useState(false)
+  const [planPrice, setPlanPrice] = useState('')
 
   useEffect(() => {
     if (!supabase) {
@@ -228,15 +243,23 @@ export default function App() {
   }
 
   async function refreshAll() {
-    await Promise.all([loadCounts(), loadCustomers(), loadPlans(), loadLicenses()])
+    await Promise.all([
+      loadCounts(),
+      loadCustomers(),
+      loadPlans(),
+      loadLicenses(),
+      loadGlobalHistory(),
+    ])
   }
 
   async function loadCounts() {
     if (!supabase) return
     const now = new Date().toISOString()
-    const [active, expired, blocked, customerCount, devices] = await Promise.all([
+    const sevenDays = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+    const [active, expired, expiring, blocked, customerCount, devices] = await Promise.all([
       supabase.from('licenses').select('*', { count: 'exact', head: true }).eq('status', 'active').or(`expires_at.is.null,expires_at.gt.${now}`),
       supabase.from('licenses').select('*', { count: 'exact', head: true }).eq('status', 'active').lt('expires_at', now),
+      supabase.from('licenses').select('*', { count: 'exact', head: true }).eq('status', 'active').gt('expires_at', now).lte('expires_at', sevenDays),
       supabase.from('licenses').select('*', { count: 'exact', head: true }).eq('status', 'blocked'),
       supabase.from('customers').select('*', { count: 'exact', head: true }),
       supabase.from('devices').select('*', { count: 'exact', head: true }).eq('is_active', true),
@@ -244,6 +267,7 @@ export default function App() {
     setCounts({
       active: active.count ?? 0,
       expired: expired.count ?? 0,
+      expiring: expiring.count ?? 0,
       blocked: blocked.count ?? 0,
       customers: customerCount.count ?? 0,
       devices: devices.count ?? 0,
@@ -263,10 +287,22 @@ export default function App() {
     if (!supabase) return
     const { data } = await supabase
       .from('plans')
-      .select('id, name, duration_days, max_devices, is_lifetime')
-      .eq('is_active', true)
+      .select('id, name, duration_days, max_devices, is_lifetime, price_cents, is_active')
+      .order('is_active', { ascending: false })
       .order('duration_days', { ascending: true, nullsFirst: false })
     setPlans((data ?? []) as Plan[])
+  }
+
+  async function loadGlobalHistory() {
+    if (!supabase) return
+
+    const { data } = await supabase
+      .from('license_events')
+      .select('id, event_type, metadata, created_at, customers(name), licenses(license_key_last4)')
+      .order('created_at', { ascending: false })
+      .limit(100)
+
+    setGlobalEvents((data ?? []) as unknown as GlobalEvent[])
   }
 
   async function loadLicenses() {
@@ -518,6 +554,84 @@ export default function App() {
     }
   }
 
+  async function createPlan(event: FormEvent) {
+    event.preventDefault()
+    if (!supabase || !planName.trim()) return
+
+    if (!planLifetime && (!Number.isInteger(planDays) || planDays < 1 || planDays > 3650)) {
+      setMessage('Informe uma duração entre 1 e 3650 dias.')
+      return
+    }
+
+    if (!Number.isInteger(planDevices) || planDevices < 1 || planDevices > 50) {
+      setMessage('Quantidade de dispositivos inválida.')
+      return
+    }
+
+    const parsedPrice = planPrice.trim()
+      ? Math.round(Number(planPrice.replace(',', '.')) * 100)
+      : null
+
+    if (parsedPrice !== null && (!Number.isFinite(parsedPrice) || parsedPrice < 0)) {
+      setMessage('Preço inválido.')
+      return
+    }
+
+    setBusy(true)
+    setMessage('')
+    setNotice('')
+
+    const { error } = await supabase.from('plans').insert({
+      name: planName.trim(),
+      duration_days: planLifetime ? null : planDays,
+      max_devices: planDevices,
+      is_lifetime: planLifetime,
+      price_cents: parsedPrice,
+      is_active: true,
+    })
+
+    setBusy(false)
+
+    if (error) {
+      setMessage(error.message)
+      return
+    }
+
+    setPlanName('')
+    setPlanDays(30)
+    setPlanDevices(1)
+    setPlanLifetime(false)
+    setPlanPrice('')
+    setNotice('Plano criado com sucesso.')
+    await loadPlans()
+  }
+
+  async function togglePlan(plan: Plan) {
+    if (!supabase) return
+    const next = !plan.is_active
+
+    if (!window.confirm(`${next ? 'Ativar' : 'Desativar'} o plano "${plan.name}"?`)) return
+
+    setMessage('')
+    setNotice('')
+
+    const { error } = await supabase
+      .from('plans')
+      .update({
+        is_active: next,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', plan.id)
+
+    if (error) {
+      setMessage(error.message)
+      return
+    }
+
+    setNotice(next ? 'Plano ativado.' : 'Plano desativado.')
+    await loadPlans()
+  }
+
   async function invokeAccess(
     action: 'activate' | 'validate' | 'deactivate',
     payload: Record<string, unknown>
@@ -647,6 +761,7 @@ export default function App() {
 
   const cards = useMemo(() => [
     { label: 'Licenças ativas', value: counts.active, icon: ShieldCheck },
+    { label: 'Vencem em 7 dias', value: counts.expiring, icon: Clock3 },
     { label: 'Clientes', value: counts.customers, icon: Users },
     { label: 'Dispositivos ativos', value: counts.devices, icon: Smartphone },
     { label: 'Vencidas', value: counts.expired, icon: Clock3 },
@@ -688,6 +803,8 @@ export default function App() {
           <button className={page === 'dashboard' ? 'active' : ''} onClick={() => setPage('dashboard')}>Dashboard</button>
           <button className={page === 'licenses' ? 'active' : ''} onClick={() => setPage('licenses')}>Licenças</button>
           <button className={page === 'customers' ? 'active' : ''} onClick={() => setPage('customers')}>Clientes</button>
+          <button className={page === 'plans' ? 'active' : ''} onClick={() => setPage('plans')}>Planos</button>
+          <button className={page === 'history' ? 'active' : ''} onClick={() => setPage('history')}>Histórico</button>
           <button className={page === 'activation' ? 'active' : ''} onClick={() => setPage('activation')}>Teste ativação</button>
         </nav>
         <button className="secondary" onClick={logout}><LogOut size={16}/> Sair</button>
@@ -695,7 +812,7 @@ export default function App() {
 
       <main className="dashboard">
         <header>
-          <div><p className="eyebrow">ALTIV CODE MOBILE</p><h1>{page === 'dashboard' ? 'Painel administrativo' : page === 'licenses' ? 'Licenças' : page === 'customers' ? 'Clientes' : 'Teste de ativação'}</h1></div>
+          <div><p className="eyebrow">ALTIV CODE MOBILE</p><h1>{page === 'dashboard' ? 'Painel administrativo' : page === 'licenses' ? 'Licenças' : page === 'customers' ? 'Clientes' : page === 'plans' ? 'Planos' : page === 'history' ? 'Histórico' : 'Teste de ativação'}</h1></div>
           <button onClick={() => setShowLicenseForm(true)}><KeyRound size={17}/> Nova licença</button>
         </header>
 
@@ -703,6 +820,8 @@ export default function App() {
           <button onClick={() => setPage('dashboard')}>Dashboard</button>
           <button onClick={() => setPage('licenses')}>Licenças</button>
           <button onClick={() => setPage('customers')}>Clientes</button>
+          <button onClick={() => setPage('plans')}>Planos</button>
+          <button onClick={() => setPage('history')}>Histórico</button>
           <button onClick={() => setPage('activation')}>Teste</button>
         </div>
 
@@ -716,6 +835,60 @@ export default function App() {
           </section>
           <section className="panel"><p className="eyebrow">FASE 2</p><h2>Operação comercial ativa</h2><p>O painel agora cadastra clientes, gera licenças seguras, renova, bloqueia, desbloqueia e libera dispositivos.</p></section>
         </>}
+
+        {page === 'plans' && <section className="panel">
+          <div className="panel-title">
+            <div>
+              <p className="eyebrow">COMERCIAL</p>
+              <h2>Planos de licença</h2>
+              <p>Crie planos novos e controle quais aparecem na geração de licenças.</p>
+            </div>
+          </div>
+
+          <form className="plan-form" onSubmit={createPlan}>
+            <label>Nome do plano<input value={planName} onChange={e => setPlanName(e.target.value)} placeholder="Ex.: Semestral 180 dias" required /></label>
+            <label>Duração em dias<input type="number" min="1" max="3650" value={planDays} onChange={e => setPlanDays(Number(e.target.value))} disabled={planLifetime} /></label>
+            <label>Dispositivos<input type="number" min="1" max="50" value={planDevices} onChange={e => setPlanDevices(Number(e.target.value))} /></label>
+            <label>Preço (R$)<input inputMode="decimal" value={planPrice} onChange={e => setPlanPrice(e.target.value)} placeholder="Opcional" /></label>
+            <label className="check-label"><input type="checkbox" checked={planLifetime} onChange={e => setPlanLifetime(e.target.checked)} /> Vitalício</label>
+            <button disabled={busy}><Plus size={16}/> Criar plano</button>
+          </form>
+
+          <div className="plan-grid">
+            {plans.map(plan => <article className="plan-card" key={plan.id}>
+              <div>
+                <span className={`badge ${!plan.is_active ? 'danger' : ''}`}>{plan.is_active ? 'Ativo' : 'Inativo'}</span>
+                <h3>{plan.name}</h3>
+                <p>{plan.is_lifetime ? 'Vitalício' : `${plan.duration_days} dias`} • {plan.max_devices} dispositivo(s)</p>
+                <strong>{plan.price_cents === null ? 'Preço não definido' : new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(plan.price_cents / 100)}</strong>
+              </div>
+              <button className="ghost" onClick={() => togglePlan(plan)}>{plan.is_active ? 'Desativar' : 'Ativar'}</button>
+            </article>)}
+          </div>
+        </section>}
+
+        {page === 'history' && <section className="panel">
+          <div className="panel-title">
+            <div>
+              <p className="eyebrow">AUDITORIA</p>
+              <h2>Histórico geral</h2>
+              <p>Últimos eventos de licenças e dispositivos registrados pelo sistema.</p>
+            </div>
+            <button className="ghost" onClick={loadGlobalHistory}><RefreshCw size={16}/> Atualizar</button>
+          </div>
+
+          <div className="history-list">
+            {globalEvents.map(event => <div className="history-card" key={event.id}>
+              <div>
+                <strong>{eventLabels[event.event_type] || event.event_type.replaceAll('_', ' ')}</strong>
+                <span>{event.customers?.name || 'Sem cliente'}{event.licenses?.license_key_last4 ? ` • licença final ${event.licenses.license_key_last4}` : ''}</span>
+                <span>{eventDetails(event)}</span>
+              </div>
+              <time>{new Date(event.created_at).toLocaleString('pt-BR')}</time>
+            </div>)}
+            {!globalEvents.length && <p>Nenhum evento registrado.</p>}
+          </div>
+        </section>}
 
         {page === 'activation' && <section className="panel activation-panel">
           <div className="panel-title">
@@ -895,7 +1068,7 @@ export default function App() {
           <form className="modal" onClick={e => e.stopPropagation()} onSubmit={createLicense}>
             <h2>Gerar nova licença</h2>
             <label>Cliente<select value={licenseCustomer} onChange={e => setLicenseCustomer(e.target.value)}><option value="">Sem cliente</option>{customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
-            <label>Plano<select value={licensePlan} onChange={e => { setLicensePlan(e.target.value); const p = plans.find(x => x.id === e.target.value); if (p) setMaxDevices(p.max_devices) }} required><option value="">Selecione</option>{plans.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+            <label>Plano<select value={licensePlan} onChange={e => { setLicensePlan(e.target.value); const p = plans.find(x => x.id === e.target.value); if (p) setMaxDevices(p.max_devices) }} required><option value="">Selecione</option>{plans.filter(p => p.is_active).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
             <label>Máximo de dispositivos<input type="number" min="1" max="50" value={maxDevices} onChange={e => setMaxDevices(Number(e.target.value))} /></label>
             <label>Observação<textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3}/></label>
             <div className="modal-actions"><button type="button" className="ghost" onClick={() => setShowLicenseForm(false)}>Cancelar</button><button disabled={busy}>{busy ? 'Gerando…' : 'Gerar licença'}</button></div>
