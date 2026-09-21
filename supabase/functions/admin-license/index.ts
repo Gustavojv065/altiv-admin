@@ -53,6 +53,7 @@ Deno.serve(async (req: Request) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? ""
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? ""
+    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
 
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: {
@@ -82,6 +83,17 @@ Deno.serve(async (req: Request) => {
     if (adminError || !admin) {
       return json({ error: "Acesso administrativo não autorizado." }, 403)
     }
+
+    const service = createClient(
+      supabaseUrl,
+      serviceRoleKey,
+      {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+        },
+      }
+    )
 
     const body = await req.json()
     const action = String(body.action ?? "")
@@ -181,7 +193,7 @@ Deno.serve(async (req: Request) => {
         return json({ error: "Não foi possível gerar uma chave única. Tente novamente." }, 500)
       }
 
-      const { error: recoveryError } = await supabase.rpc(
+      const { error: recoveryError } = await service.rpc(
         "store_license_recovery_key",
         {
           p_license_id: created.id,
@@ -225,7 +237,11 @@ Deno.serve(async (req: Request) => {
         return json({ error: "Licença inválida." }, 400)
       }
 
-      const { data: key, error } = await supabase.rpc(
+      if (!["owner", "admin"].includes(admin.role)) {
+        return json({ error: "Somente owner/admin pode visualizar chaves." }, 403)
+      }
+
+      const { data: key, error } = await service.rpc(
         "reveal_license_key",
         { p_license_id: licenseId }
       )
@@ -241,6 +257,13 @@ Deno.serve(async (req: Request) => {
         }, 404)
       }
 
+      await supabase.from("license_events").insert({
+        license_id: licenseId,
+        admin_user_id: user.id,
+        event_type: "license_key_revealed",
+        metadata: {},
+      })
+
       return json({ ok: true, key })
     }
 
@@ -252,7 +275,11 @@ Deno.serve(async (req: Request) => {
         return json({ error: "Informe a licença e a chave completa." }, 400)
       }
 
-      const { error } = await supabase.rpc(
+      if (!["owner", "admin"].includes(admin.role)) {
+        return json({ error: "Somente owner/admin pode salvar chaves recuperáveis." }, 403)
+      }
+
+      const { error } = await service.rpc(
         "store_license_recovery_key",
         {
           p_license_id: licenseId,
