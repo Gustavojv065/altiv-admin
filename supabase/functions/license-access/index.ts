@@ -179,6 +179,59 @@ Deno.serve(async (req: Request) => {
       })
     }
 
+    if (action === "deactivate") {
+      const activationToken = String(body.activationToken ?? "").trim()
+      if (!activationToken) return json({ error: "Token ausente." }, 401)
+
+      const tokenHash = await sha256(activationToken)
+
+      const { data: device, error: deviceError } = await admin
+        .from("devices")
+        .select("id, license_id, is_active")
+        .eq("activation_token_hash", tokenHash)
+        .eq("device_fingerprint_hash", fingerprintHash)
+        .maybeSingle()
+
+      if (deviceError || !device || !device.is_active) {
+        return json({ error: "Ativação inválida." }, 401)
+      }
+
+      const { data: license } = await admin
+        .from("licenses")
+        .select("customer_id")
+        .eq("id", device.license_id)
+        .maybeSingle()
+
+      const nowIso = new Date().toISOString()
+      const { error: updateError } = await admin
+        .from("devices")
+        .update({
+          is_active: false,
+          revoked_at: nowIso,
+          last_seen_at: nowIso,
+          activation_token_hash: null,
+          token_created_at: null,
+        })
+        .eq("id", device.id)
+
+      if (updateError) {
+        return json({ error: "Falha ao liberar dispositivo." }, 500)
+      }
+
+      await admin.from("license_events").insert({
+        license_id: device.license_id,
+        customer_id: license?.customer_id ?? null,
+        admin_user_id: null,
+        event_type: "device_deactivated",
+        metadata: {
+          device_label: deviceLabel,
+          app_version: appVersion,
+        },
+      })
+
+      return json({ ok: true, serverTime: nowIso })
+    }
+
     if (action === "validate") {
       const activationToken = String(body.activationToken ?? "").trim()
       if (!activationToken) return json({ error: "Token ausente." }, 401)

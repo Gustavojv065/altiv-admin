@@ -17,7 +17,7 @@ import {
 import { supabase, supabaseConfigured } from './lib/supabase'
 
 type AuthMode = 'login' | 'signup'
-type Page = 'dashboard' | 'licenses' | 'customers'
+type Page = 'dashboard' | 'licenses' | 'customers' | 'activation'
 
 type DashboardCounts = {
   active: number
@@ -92,6 +92,7 @@ const eventLabels: Record<string, string> = {
   devices_reset: 'Dispositivos liberados',
   device_activated: 'Dispositivo ativado',
   device_reactivated: 'Dispositivo reativado',
+  device_deactivated: 'Dispositivo liberado',
 }
 
 function eventDetails(event: LicenseEvent) {
@@ -154,6 +155,26 @@ export default function App() {
   const [editCustomerEmail, setEditCustomerEmail] = useState('')
   const [editCustomerPhone, setEditCustomerPhone] = useState('')
   const [editCustomerNotes, setEditCustomerNotes] = useState('')
+  const [testLicenseKey, setTestLicenseKey] = useState('')
+  const [testDeviceLabel, setTestDeviceLabel] = useState('Painel ALTIV - teste')
+  const [testFingerprint] = useState(() => {
+    const stored = window.localStorage.getItem('altiv-admin-test-device')
+    if (stored) return stored
+
+    const created = `altiv-admin-test-${crypto.randomUUID()}`
+    window.localStorage.setItem('altiv-admin-test-device', created)
+    return created
+  })
+  const [testToken, setTestToken] = useState(
+    () => window.sessionStorage.getItem('altiv-admin-test-token') ?? ''
+  )
+  const [testResult, setTestResult] = useState<{
+    expiresAt: string | null
+    maxDevices: number
+    last4: string
+    serverTime: string
+  } | null>(null)
+  const [testBusy, setTestBusy] = useState(false)
 
   useEffect(() => {
     if (!supabase) {
@@ -497,6 +518,129 @@ export default function App() {
     }
   }
 
+  async function invokeAccess(
+    action: 'activate' | 'validate' | 'deactivate',
+    payload: Record<string, unknown>
+  ) {
+    if (!supabase) return null
+
+    const { data, error } = await supabase.functions.invoke('license-access', {
+      body: {
+        action,
+        deviceFingerprint: testFingerprint,
+        deviceLabel: testDeviceLabel,
+        appVersion: 'ALTIV ADMIN TEST',
+        ...payload,
+      },
+    })
+
+    if (error) {
+      setMessage('Falha ao comunicar com o serviço de ativação.')
+      return null
+    }
+
+    if (data?.error) {
+      setMessage(data.error)
+      return null
+    }
+
+    return data
+  }
+
+  async function runActivationTest(event: FormEvent) {
+    event.preventDefault()
+
+    if (!testLicenseKey.trim()) {
+      setMessage('Informe a chave completa da licença.')
+      return
+    }
+
+    setTestBusy(true)
+    setMessage('')
+    setNotice('')
+    setTestResult(null)
+
+    const activation = await invokeAccess('activate', {
+      licenseKey: testLicenseKey,
+    })
+
+    if (!activation?.activationToken) {
+      setTestBusy(false)
+      return
+    }
+
+    const token = String(activation.activationToken)
+    setTestToken(token)
+    window.sessionStorage.setItem('altiv-admin-test-token', token)
+
+    const validation = await invokeAccess('validate', {
+      activationToken: token,
+    })
+
+    setTestBusy(false)
+
+    if (!validation?.ok) return
+
+    setTestResult({
+      expiresAt: validation.license?.expiresAt ?? null,
+      maxDevices: Number(validation.license?.maxDevices ?? 1),
+      last4: String(validation.license?.last4 ?? ''),
+      serverTime: String(validation.serverTime ?? ''),
+    })
+    setNotice('Teste concluído: ativação e validação funcionaram corretamente.')
+    await refreshAll()
+  }
+
+  async function validateTestActivation() {
+    if (!testToken) {
+      setMessage('Não há um token de teste salvo nesta sessão.')
+      return
+    }
+
+    setTestBusy(true)
+    setMessage('')
+    setNotice('')
+
+    const validation = await invokeAccess('validate', {
+      activationToken: testToken,
+    })
+
+    setTestBusy(false)
+
+    if (!validation?.ok) return
+
+    setTestResult({
+      expiresAt: validation.license?.expiresAt ?? null,
+      maxDevices: Number(validation.license?.maxDevices ?? 1),
+      last4: String(validation.license?.last4 ?? ''),
+      serverTime: String(validation.serverTime ?? ''),
+    })
+    setNotice('Validação da licença concluída com sucesso.')
+  }
+
+  async function releaseTestDevice() {
+    if (!testToken) return
+    if (!window.confirm('Liberar o dispositivo usado neste teste?')) return
+
+    setTestBusy(true)
+    setMessage('')
+    setNotice('')
+
+    const result = await invokeAccess('deactivate', {
+      activationToken: testToken,
+    })
+
+    setTestBusy(false)
+
+    if (!result?.ok) return
+
+    setTestToken('')
+    setTestResult(null)
+    window.sessionStorage.removeItem('altiv-admin-test-token')
+    setNotice('Dispositivo de teste liberado. A vaga da licença está disponível novamente.')
+    await refreshAll()
+  }
+
   async function logout() {
     await supabase?.auth.signOut()
   }
@@ -544,13 +688,14 @@ export default function App() {
           <button className={page === 'dashboard' ? 'active' : ''} onClick={() => setPage('dashboard')}>Dashboard</button>
           <button className={page === 'licenses' ? 'active' : ''} onClick={() => setPage('licenses')}>Licenças</button>
           <button className={page === 'customers' ? 'active' : ''} onClick={() => setPage('customers')}>Clientes</button>
+          <button className={page === 'activation' ? 'active' : ''} onClick={() => setPage('activation')}>Teste ativação</button>
         </nav>
         <button className="secondary" onClick={logout}><LogOut size={16}/> Sair</button>
       </aside>
 
       <main className="dashboard">
         <header>
-          <div><p className="eyebrow">ALTIV CODE MOBILE</p><h1>{page === 'dashboard' ? 'Painel administrativo' : page === 'licenses' ? 'Licenças' : 'Clientes'}</h1></div>
+          <div><p className="eyebrow">ALTIV CODE MOBILE</p><h1>{page === 'dashboard' ? 'Painel administrativo' : page === 'licenses' ? 'Licenças' : page === 'customers' ? 'Clientes' : 'Teste de ativação'}</h1></div>
           <button onClick={() => setShowLicenseForm(true)}><KeyRound size={17}/> Nova licença</button>
         </header>
 
@@ -558,6 +703,7 @@ export default function App() {
           <button onClick={() => setPage('dashboard')}>Dashboard</button>
           <button onClick={() => setPage('licenses')}>Licenças</button>
           <button onClick={() => setPage('customers')}>Clientes</button>
+          <button onClick={() => setPage('activation')}>Teste</button>
         </div>
 
         {message && <div className="alert">{message}</div>}
@@ -570,6 +716,70 @@ export default function App() {
           </section>
           <section className="panel"><p className="eyebrow">FASE 2</p><h2>Operação comercial ativa</h2><p>O painel agora cadastra clientes, gera licenças seguras, renova, bloqueia, desbloqueia e libera dispositivos.</p></section>
         </>}
+
+        {page === 'activation' && <section className="panel activation-panel">
+          <div className="panel-title">
+            <div>
+              <p className="eyebrow">SIMULAÇÃO DO APK</p>
+              <h2>Testar ativação e validação</h2>
+              <p>Este teste usa o mesmo serviço que será conectado ao ALTIV CODE MOBILE. Ele ocupa temporariamente uma vaga de dispositivo da licença.</p>
+            </div>
+            <span className="badge">API ativa</span>
+          </div>
+
+          <form className="activation-form" onSubmit={runActivationTest}>
+            <label>
+              Chave completa da licença
+              <input
+                value={testLicenseKey}
+                onChange={e => setTestLicenseKey(e.target.value.toUpperCase())}
+                placeholder="ALTIV-XXXX-XXXX-XXXX"
+                autoComplete="off"
+                required
+              />
+            </label>
+
+            <label>
+              Nome do dispositivo de teste
+              <input
+                value={testDeviceLabel}
+                onChange={e => setTestDeviceLabel(e.target.value)}
+                required
+              />
+            </label>
+
+            <div className="test-device-id">
+              <span>Identificador do teste</span>
+              <code>{testFingerprint}</code>
+            </div>
+
+            <button disabled={testBusy}>
+              <ShieldCheck size={17}/>
+              {testBusy ? 'Testando…' : 'Ativar e validar'}
+            </button>
+          </form>
+
+          <div className="test-tip">
+            <strong>Importante:</strong> a chave completa não é recuperável pelo painel depois de criada. Isso é proposital por segurança. Use a chave que você copiou no momento da geração.
+          </div>
+
+          {testToken && <div className="test-actions">
+            <button className="ghost" onClick={validateTestActivation} disabled={testBusy}>
+              <RefreshCw size={16}/> Validar novamente
+            </button>
+            <button className="danger-button" onClick={releaseTestDevice} disabled={testBusy}>
+              <Smartphone size={16}/> Liberar dispositivo de teste
+            </button>
+          </div>}
+
+          {testResult && <div className="test-result">
+            <div><span>Ativação</span><strong>OK</strong></div>
+            <div><span>Validação</span><strong>OK</strong></div>
+            <div><span>Licença</span><strong>Final {testResult.last4}</strong></div>
+            <div><span>Validade</span><strong>{testResult.expiresAt ? new Date(testResult.expiresAt).toLocaleDateString('pt-BR') : 'Vitalícia'}</strong></div>
+            <div><span>Dispositivos</span><strong>{testResult.maxDevices}</strong></div>
+          </div>}
+        </section>}
 
         {page === 'customers' && <section className="panel">
           <h2>Novo cliente</h2>
