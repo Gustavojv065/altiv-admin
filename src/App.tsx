@@ -2,14 +2,17 @@ import { FormEvent, useEffect, useMemo, useState } from 'react'
 import {
   Ban,
   Clock3,
+  Eye,
   KeyRound,
   LogOut,
+  Pencil,
   Plus,
   RefreshCw,
   ShieldCheck,
   Smartphone,
   Unlock,
   Users,
+  XCircle,
 } from 'lucide-react'
 import { supabase, supabaseConfigured } from './lib/supabase'
 
@@ -29,7 +32,25 @@ type Customer = {
   name: string
   email: string | null
   phone: string | null
+  notes: string | null
   is_active: boolean
+}
+
+type Device = {
+  id: string
+  device_label: string | null
+  app_version: string | null
+  first_seen_at: string
+  last_seen_at: string
+  is_active: boolean
+  revoked_at: string | null
+}
+
+type LicenseEvent = {
+  id: number
+  event_type: string
+  metadata: Record<string, unknown>
+  created_at: string
 }
 
 type Plan = {
@@ -85,6 +106,16 @@ export default function App() {
   const [customerName, setCustomerName] = useState('')
   const [customerEmail, setCustomerEmail] = useState('')
   const [customerPhone, setCustomerPhone] = useState('')
+  const [notice, setNotice] = useState('')
+  const [selectedLicense, setSelectedLicense] = useState<License | null>(null)
+  const [licenseDevices, setLicenseDevices] = useState<Device[]>([])
+  const [licenseEvents, setLicenseEvents] = useState<LicenseEvent[]>([])
+  const [detailsBusy, setDetailsBusy] = useState(false)
+  const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null)
+  const [editCustomerName, setEditCustomerName] = useState('')
+  const [editCustomerEmail, setEditCustomerEmail] = useState('')
+  const [editCustomerPhone, setEditCustomerPhone] = useState('')
+  const [editCustomerNotes, setEditCustomerNotes] = useState('')
 
   useEffect(() => {
     if (!supabase) {
@@ -164,7 +195,7 @@ export default function App() {
     if (!supabase) return
     const { data } = await supabase
       .from('customers')
-      .select('id, name, email, phone, is_active')
+      .select('id, name, email, phone, notes, is_active')
       .order('created_at', { ascending: false })
     setCustomers((data ?? []) as Customer[])
   }
@@ -232,7 +263,83 @@ export default function App() {
     setCustomerName('')
     setCustomerEmail('')
     setCustomerPhone('')
+    setNotice('Cliente cadastrado com sucesso.')
     await refreshAll()
+  }
+
+  function openCustomerEditor(customer: Customer) {
+    setEditingCustomer(customer)
+    setEditCustomerName(customer.name)
+    setEditCustomerEmail(customer.email ?? '')
+    setEditCustomerPhone(customer.phone ?? '')
+    setEditCustomerNotes(customer.notes ?? '')
+    setMessage('')
+    setNotice('')
+  }
+
+  async function updateCustomer(event: FormEvent) {
+    event.preventDefault()
+    if (!supabase || !editingCustomer || !editCustomerName.trim()) return
+
+    setBusy(true)
+    setMessage('')
+    setNotice('')
+
+    const { error } = await supabase
+      .from('customers')
+      .update({
+        name: editCustomerName.trim(),
+        email: editCustomerEmail.trim() || null,
+        phone: editCustomerPhone.trim() || null,
+        notes: editCustomerNotes.trim() || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', editingCustomer.id)
+
+    setBusy(false)
+
+    if (error) {
+      setMessage(error.message)
+      return
+    }
+
+    setEditingCustomer(null)
+    setNotice('Cliente atualizado com sucesso.')
+    await refreshAll()
+  }
+
+  async function openLicenseDetails(license: License) {
+    if (!supabase) return
+
+    setSelectedLicense(license)
+    setLicenseDevices([])
+    setLicenseEvents([])
+    setDetailsBusy(true)
+    setMessage('')
+    setNotice('')
+
+    const [devicesResult, eventsResult] = await Promise.all([
+      supabase
+        .from('devices')
+        .select('id, device_label, app_version, first_seen_at, last_seen_at, is_active, revoked_at')
+        .eq('license_id', license.id)
+        .order('last_seen_at', { ascending: false }),
+      supabase
+        .from('license_events')
+        .select('id, event_type, metadata, created_at')
+        .eq('license_id', license.id)
+        .order('created_at', { ascending: false })
+        .limit(50),
+    ])
+
+    if (devicesResult.error || eventsResult.error) {
+      setMessage(devicesResult.error?.message || eventsResult.error?.message || 'Erro ao carregar detalhes.')
+    } else {
+      setLicenseDevices((devicesResult.data ?? []) as Device[])
+      setLicenseEvents((eventsResult.data ?? []) as LicenseEvent[])
+    }
+
+    setDetailsBusy(false)
   }
 
   async function invokeLicense(action: string, payload: Record<string, unknown>) {
@@ -280,9 +387,35 @@ export default function App() {
   }
 
   async function changeStatus(id: string, status: 'active' | 'blocked' | 'cancelled') {
+    const labels = {
+      active: 'desbloquear',
+      blocked: 'bloquear',
+      cancelled: 'cancelar',
+    }
+
+    if (!window.confirm(`Confirma ${labels[status]} esta licença?`)) return
+
     setMessage('')
+    setNotice('')
+
     const data = await invokeLicense('status', { licenseId: id, status })
-    if (data) await refreshAll()
+
+    if (data) {
+      setNotice(
+        status === 'active'
+          ? 'Licença desbloqueada com sucesso.'
+          : status === 'blocked'
+            ? 'Licença bloqueada com sucesso.'
+            : 'Licença cancelada com sucesso.'
+      )
+      await refreshAll()
+
+      const updated = licenses.find(item => item.id === id)
+      if (updated && selectedLicense?.id === id) {
+        setSelectedLicense({ ...updated, status })
+        await openLicenseDetails({ ...updated, status })
+      }
+    }
   }
 
   async function renewLicense(id: string) {
@@ -293,14 +426,37 @@ export default function App() {
       setMessage('Quantidade de dias inválida.')
       return
     }
+    setMessage('')
+    setNotice('')
+
     const data = await invokeLicense('renew', { licenseId: id, days })
-    if (data) await refreshAll()
+
+    if (data) {
+      setNotice(`Licença renovada por mais ${days} dia(s).`)
+      await refreshAll()
+
+      if (selectedLicense?.id === id) {
+        const refreshed = licenses.find(item => item.id === id) ?? selectedLicense
+        await openLicenseDetails(refreshed)
+      }
+    }
   }
 
   async function resetDevices(id: string) {
     if (!window.confirm('Liberar todos os dispositivos desta licença?')) return
+    setMessage('')
+    setNotice('')
+
     const data = await invokeLicense('reset_devices', { licenseId: id })
-    if (data) await refreshAll()
+
+    if (data) {
+      setNotice('Dispositivos liberados com sucesso.')
+      await refreshAll()
+
+      if (selectedLicense?.id === id) {
+        await openLicenseDetails(selectedLicense)
+      }
+    }
   }
 
   async function logout() {
@@ -367,6 +523,7 @@ export default function App() {
         </div>
 
         {message && <div className="alert">{message}</div>}
+        {notice && <div className="notice-box">{notice}</div>}
         {createdKey && <div className="success-box"><strong>Chave criada</strong><code>{createdKey}</code><button onClick={() => navigator.clipboard.writeText(createdKey)}>Copiar chave</button></div>}
 
         {page === 'dashboard' && <>
@@ -385,7 +542,10 @@ export default function App() {
             <button disabled={busy}><Plus size={16}/> Salvar cliente</button>
           </form>
           <div className="list">
-            {customers.map(c => <div className="row" key={c.id}><div><strong>{c.name}</strong><span>{c.phone || c.email || 'Sem contato informado'}</span></div><span className="badge">{c.is_active ? 'Ativo' : 'Inativo'}</span></div>)}
+            {customers.map(c => <div className="row" key={c.id}>
+              <div><strong>{c.name}</strong><span>{c.phone || c.email || 'Sem contato informado'}</span>{c.notes && <span>{c.notes}</span>}</div>
+              <div className="row-actions"><span className="badge">{c.is_active ? 'Ativo' : 'Inativo'}</span><button className="ghost" onClick={() => openCustomerEditor(c)}><Pencil size={15}/> Editar</button></div>
+            </div>)}
             {!customers.length && <p>Nenhum cliente cadastrado ainda.</p>}
           </div>
         </section>}
@@ -403,17 +563,85 @@ export default function App() {
                 </div>
                 <div className="license-actions">
                   <span className={`badge ${l.status === 'blocked' ? 'danger' : expired ? 'warn' : ''}`}>{l.status === 'blocked' ? 'Bloqueada' : expired ? 'Vencida' : l.status === 'cancelled' ? 'Cancelada' : 'Ativa'}</span>
+                  <button className="ghost" onClick={() => openLicenseDetails(l)}><Eye size={15}/> Detalhes</button>
                   <button className="ghost" onClick={() => renewLicense(l.id)}>Renovar</button>
                   <button className="ghost" onClick={() => resetDevices(l.id)}><Smartphone size={15}/> Liberar aparelhos</button>
                   {l.status === 'blocked'
                     ? <button className="ghost" onClick={() => changeStatus(l.id, 'active')}><Unlock size={15}/> Desbloquear</button>
-                    : <button className="danger-button" onClick={() => changeStatus(l.id, 'blocked')}><Ban size={15}/> Bloquear</button>}
+                    : l.status === 'cancelled'
+                      ? <button className="ghost" onClick={() => changeStatus(l.id, 'active')}><Unlock size={15}/> Reativar</button>
+                      : <button className="danger-button" onClick={() => changeStatus(l.id, 'blocked')}><Ban size={15}/> Bloquear</button>}
+                  {l.status !== 'cancelled' && <button className="danger-button" onClick={() => changeStatus(l.id, 'cancelled')}><XCircle size={15}/> Cancelar</button>}
                 </div>
               </div>
             })}
             {!licenses.length && <p>Nenhuma licença gerada ainda.</p>}
           </div>
         </section>}
+
+        {editingCustomer && <div className="modal-backdrop" onClick={() => setEditingCustomer(null)}>
+          <form className="modal" onClick={e => e.stopPropagation()} onSubmit={updateCustomer}>
+            <h2>Editar cliente</h2>
+            <label>Nome<input value={editCustomerName} onChange={e => setEditCustomerName(e.target.value)} required /></label>
+            <label>E-mail<input value={editCustomerEmail} onChange={e => setEditCustomerEmail(e.target.value)} type="email" /></label>
+            <label>Telefone / WhatsApp<input value={editCustomerPhone} onChange={e => setEditCustomerPhone(e.target.value)} /></label>
+            <label>Observações<textarea value={editCustomerNotes} onChange={e => setEditCustomerNotes(e.target.value)} rows={3}/></label>
+            <div className="modal-actions"><button type="button" className="ghost" onClick={() => setEditingCustomer(null)}>Cancelar</button><button disabled={busy}>{busy ? 'Salvando…' : 'Salvar alterações'}</button></div>
+          </form>
+        </div>}
+
+        {selectedLicense && <div className="modal-backdrop" onClick={() => setSelectedLicense(null)}>
+          <section className="modal modal-wide" onClick={e => e.stopPropagation()}>
+            <div className="detail-header">
+              <div>
+                <p className="eyebrow">LICENÇA</p>
+                <h2>{selectedLicense.customers?.name || 'Sem cliente vinculado'}</h2>
+                <p>{selectedLicense.plans?.name || 'Plano personalizado'} • final {selectedLicense.license_key_last4}</p>
+              </div>
+              <button className="ghost" onClick={() => setSelectedLicense(null)}>Fechar</button>
+            </div>
+
+            <div className="detail-grid">
+              <div><span>Status</span><strong>{selectedLicense.status === 'active' ? 'Ativa' : selectedLicense.status === 'blocked' ? 'Bloqueada' : 'Cancelada'}</strong></div>
+              <div><span>Início</span><strong>{new Date(selectedLicense.starts_at).toLocaleDateString('pt-BR')}</strong></div>
+              <div><span>Vencimento</span><strong>{selectedLicense.expires_at ? new Date(selectedLicense.expires_at).toLocaleDateString('pt-BR') : 'Vitalícia'}</strong></div>
+              <div><span>Dispositivos permitidos</span><strong>{selectedLicense.max_devices}</strong></div>
+            </div>
+
+            {selectedLicense.notes && <div className="detail-note"><span>Observação</span><p>{selectedLicense.notes}</p></div>}
+
+            <div className="detail-actions">
+              <button className="ghost" onClick={() => renewLicense(selectedLicense.id)}>Renovar</button>
+              <button className="ghost" onClick={() => resetDevices(selectedLicense.id)}><Smartphone size={15}/> Liberar aparelhos</button>
+              {selectedLicense.status === 'blocked'
+                ? <button className="ghost" onClick={() => changeStatus(selectedLicense.id, 'active')}><Unlock size={15}/> Desbloquear</button>
+                : selectedLicense.status === 'cancelled'
+                  ? <button className="ghost" onClick={() => changeStatus(selectedLicense.id, 'active')}><Unlock size={15}/> Reativar</button>
+                  : <button className="danger-button" onClick={() => changeStatus(selectedLicense.id, 'blocked')}><Ban size={15}/> Bloquear</button>}
+              {selectedLicense.status !== 'cancelled' && <button className="danger-button" onClick={() => changeStatus(selectedLicense.id, 'cancelled')}><XCircle size={15}/> Cancelar</button>}
+            </div>
+
+            <div className="detail-section">
+              <h3>Dispositivos vinculados</h3>
+              {detailsBusy && <p>Carregando…</p>}
+              {!detailsBusy && !licenseDevices.length && <p>Nenhum dispositivo vinculado.</p>}
+              {!detailsBusy && licenseDevices.map(device => <div className="history-row" key={device.id}>
+                <div><strong>{device.device_label || 'Dispositivo sem nome'}</strong><span>{device.app_version ? `Versão ${device.app_version}` : 'Versão não informada'}</span></div>
+                <div className="history-meta"><span>{device.is_active ? 'Ativo' : 'Liberado'}</span><span>Último acesso: {new Date(device.last_seen_at).toLocaleString('pt-BR')}</span></div>
+              </div>)}
+            </div>
+
+            <div className="detail-section">
+              <h3>Histórico da licença</h3>
+              {detailsBusy && <p>Carregando…</p>}
+              {!detailsBusy && !licenseEvents.length && <p>Nenhum evento registrado.</p>}
+              {!detailsBusy && licenseEvents.map(event => <div className="history-row" key={event.id}>
+                <div><strong>{event.event_type.replaceAll('_', ' ')}</strong><span>{new Date(event.created_at).toLocaleString('pt-BR')}</span></div>
+                <code>{Object.keys(event.metadata || {}).length ? JSON.stringify(event.metadata) : '—'}</code>
+              </div>)}
+            </div>
+          </section>
+        </div>}
 
         {showLicenseForm && <div className="modal-backdrop" onClick={() => setShowLicenseForm(false)}>
           <form className="modal" onClick={e => e.stopPropagation()} onSubmit={createLicense}>
