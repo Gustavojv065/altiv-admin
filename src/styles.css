@@ -67,3 +67,8 @@
 .security-history>div:first-child>p:last-child{color:#92a1b6;line-height:1.5}
 .attempt-meta{display:grid;justify-items:end;gap:8px}
 @media(max-width:700px){.attempt-meta{justify-items:start}}
+
+.recovered-key-box{margin-top:16px;padding:14px;border:1px solid #245d46;border-radius:13px;background:#0b261c;display:grid;gap:10px}
+.recovered-key-box>span{font-size:12px;color:#8fb8a0}
+.recovered-key-box code{font-size:17px;font-weight:800;letter-spacing:.05em;color:#b8f6cf;word-break:break-all}
+.recovered-key-box>div{display:flex;gap:8px;flex-wrap:wrap}

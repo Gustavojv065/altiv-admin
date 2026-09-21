@@ -86,6 +86,7 @@ type License = {
   expires_at: string | null
   max_devices: number
   license_key_last4: string
+  key_secret_id: string | null
   notes: string | null
   customers?: { name: string } | null
   plans?: { name: string } | null
@@ -110,6 +111,8 @@ const eventLabels: Record<string, string> = {
   device_activated: 'Dispositivo ativado',
   device_reactivated: 'Dispositivo reativado',
   device_deactivated: 'Dispositivo liberado',
+  license_key_revealed: 'Chave visualizada',
+  license_key_recovery_enabled: 'Recuperação de chave ativada',
 }
 
 function eventDetails(event: LicenseEvent) {
@@ -199,6 +202,7 @@ export default function App() {
   const [planDevices, setPlanDevices] = useState(1)
   const [planLifetime, setPlanLifetime] = useState(false)
   const [planPrice, setPlanPrice] = useState('')
+  const [revealedLicenseKey, setRevealedLicenseKey] = useState('')
 
   useEffect(() => {
     if (!supabase) {
@@ -326,7 +330,7 @@ export default function App() {
     if (!supabase) return
     const { data } = await supabase
       .from('licenses')
-      .select('id, customer_id, plan_id, status, starts_at, expires_at, max_devices, license_key_last4, notes, customers(name), plans(name)')
+      .select('id, customer_id, plan_id, status, starts_at, expires_at, max_devices, license_key_last4, key_secret_id, notes, customers(name), plans(name)')
       .order('created_at', { ascending: false })
     setLicenses((data ?? []) as unknown as License[])
   }
@@ -424,6 +428,7 @@ export default function App() {
     if (!supabase) return
 
     setSelectedLicense(license)
+    setRevealedLicenseKey('')
     setLicenseDevices([])
     setLicenseEvents([])
     setDetailsBusy(true)
@@ -496,6 +501,49 @@ export default function App() {
     setLicenseCustomer('')
     await refreshAll()
     setPage('licenses')
+  }
+
+  async function revealLicenseKey(license: License) {
+    setMessage('')
+    setNotice('')
+    setRevealedLicenseKey('')
+
+    const data = await invokeLicense('reveal_key', {
+      licenseId: license.id,
+    })
+
+    if (data?.key) {
+      setRevealedLicenseKey(String(data.key))
+      setNotice('Chave recuperada com segurança. Copie e envie ao cliente.')
+      await loadGlobalHistory()
+      return
+    }
+
+    if (!license.key_secret_id) {
+      const key = window.prompt(
+        'Esta licença foi criada antes da recuperação segura. Informe a chave completa uma única vez para protegê-la no cofre:'
+      )
+
+      if (!key) return
+
+      const saved = await invokeLicense('store_recovery_key', {
+        licenseId: license.id,
+        key: key.trim().toUpperCase(),
+      })
+
+      if (!saved?.ok) return
+
+      setNotice('Chave protegida. Agora ela pode ser recuperada pelo painel.')
+      await refreshAll()
+
+      const revealed = await invokeLicense('reveal_key', {
+        licenseId: license.id,
+      })
+
+      if (revealed?.key) {
+        setRevealedLicenseKey(String(revealed.key))
+      }
+    }
   }
 
   async function changeStatus(id: string, status: 'active' | 'blocked' | 'cancelled') {
@@ -1024,6 +1072,7 @@ export default function App() {
                 <div className="license-actions">
                   <span className={`badge ${l.status === 'blocked' ? 'danger' : expired ? 'warn' : ''}`}>{l.status === 'blocked' ? 'Bloqueada' : expired ? 'Vencida' : l.status === 'cancelled' ? 'Cancelada' : 'Ativa'}</span>
                   <button className="ghost" onClick={() => openLicenseDetails(l)}><Eye size={15}/> Detalhes</button>
+                  <button className="ghost" onClick={() => revealLicenseKey(l)}><KeyRound size={15}/> Ver chave</button>
                   <button className="ghost" onClick={() => renewLicense(l.id)}>Renovar</button>
                   <button className="ghost" onClick={() => resetDevices(l.id)}><Smartphone size={15}/> Liberar aparelhos</button>
                   {l.status === 'blocked'
@@ -1071,6 +1120,7 @@ export default function App() {
             {selectedLicense.notes && <div className="detail-note"><span>Observação</span><p>{selectedLicense.notes}</p></div>}
 
             <div className="detail-actions">
+              <button className="ghost" onClick={() => revealLicenseKey(selectedLicense)}><KeyRound size={15}/> Visualizar chave</button>
               <button className="ghost" onClick={() => renewLicense(selectedLicense.id)}>Renovar</button>
               <button className="ghost" onClick={() => resetDevices(selectedLicense.id)}><Smartphone size={15}/> Liberar aparelhos</button>
               {selectedLicense.status === 'blocked'
@@ -1080,6 +1130,15 @@ export default function App() {
                   : <button className="danger-button" onClick={() => changeStatus(selectedLicense.id, 'blocked')}><Ban size={15}/> Bloquear</button>}
               {selectedLicense.status !== 'cancelled' && <button className="danger-button" onClick={() => changeStatus(selectedLicense.id, 'cancelled')}><XCircle size={15}/> Cancelar</button>}
             </div>
+
+            {revealedLicenseKey && <div className="recovered-key-box">
+              <span>Chave completa</span>
+              <code>{revealedLicenseKey}</code>
+              <div>
+                <button className="ghost" onClick={() => navigator.clipboard.writeText(revealedLicenseKey)}>Copiar chave</button>
+                <button className="ghost" onClick={() => setRevealedLicenseKey('')}>Ocultar</button>
+              </div>
+            </div>}
 
             <div className="detail-section">
               <h3>Dispositivos vinculados</h3>
