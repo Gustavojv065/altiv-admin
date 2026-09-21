@@ -69,6 +69,14 @@ type GlobalEvent = LicenseEvent & {
   licenses?: { license_key_last4: string } | null
 }
 
+type ActivationAttempt = {
+  id: number
+  license_key_last4: string | null
+  success: boolean
+  reason: string
+  created_at: string
+}
+
 type License = {
   id: string
   customer_id: string | null
@@ -185,6 +193,7 @@ export default function App() {
   } | null>(null)
   const [testBusy, setTestBusy] = useState(false)
   const [globalEvents, setGlobalEvents] = useState<GlobalEvent[]>([])
+  const [activationAttempts, setActivationAttempts] = useState<ActivationAttempt[]>([])
   const [planName, setPlanName] = useState('')
   const [planDays, setPlanDays] = useState(30)
   const [planDevices, setPlanDevices] = useState(1)
@@ -296,13 +305,21 @@ export default function App() {
   async function loadGlobalHistory() {
     if (!supabase) return
 
-    const { data } = await supabase
-      .from('license_events')
-      .select('id, event_type, metadata, created_at, customers(name), licenses(license_key_last4)')
-      .order('created_at', { ascending: false })
-      .limit(100)
+    const [eventsResult, attemptsResult] = await Promise.all([
+      supabase
+        .from('license_events')
+        .select('id, event_type, metadata, created_at, customers(name), licenses(license_key_last4)')
+        .order('created_at', { ascending: false })
+        .limit(100),
+      supabase
+        .from('activation_attempts')
+        .select('id, license_key_last4, success, reason, created_at')
+        .order('created_at', { ascending: false })
+        .limit(50),
+    ])
 
-    setGlobalEvents((data ?? []) as unknown as GlobalEvent[])
+    setGlobalEvents((eventsResult.data ?? []) as unknown as GlobalEvent[])
+    setActivationAttempts((attemptsResult.data ?? []) as ActivationAttempt[])
   }
 
   async function loadLicenses() {
@@ -887,6 +904,28 @@ export default function App() {
               <time>{new Date(event.created_at).toLocaleString('pt-BR')}</time>
             </div>)}
             {!globalEvents.length && <p>Nenhum evento registrado.</p>}
+          </div>
+
+          <div className="security-history">
+            <div>
+              <p className="eyebrow">SEGURANÇA</p>
+              <h3>Tentativas de ativação</h3>
+              <p>Monitoramento de tentativas sem guardar a chave completa ou o endereço de rede em texto puro.</p>
+            </div>
+            <div className="history-list">
+              {activationAttempts.map(attempt => <div className="history-card" key={attempt.id}>
+                <div>
+                  <strong>{attempt.success ? 'Ativação aceita' : 'Ativação recusada'}</strong>
+                  <span>{attempt.license_key_last4 ? `Licença final ${attempt.license_key_last4}` : 'Licença não identificada'}</span>
+                  <span>Motivo: {attempt.reason.replaceAll('_', ' ')}</span>
+                </div>
+                <div className="attempt-meta">
+                  <span className={`badge ${attempt.success ? '' : 'danger'}`}>{attempt.success ? 'Sucesso' : 'Bloqueada'}</span>
+                  <time>{new Date(attempt.created_at).toLocaleString('pt-BR')}</time>
+                </div>
+              </div>)}
+              {!activationAttempts.length && <p>Nenhuma tentativa registrada ainda.</p>}
+            </div>
           </div>
         </section>}
 

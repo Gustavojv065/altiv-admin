@@ -32,6 +32,15 @@ function makeToken() {
     .join("")
 }
 
+function clientSource(req: Request) {
+  return (
+    req.headers.get("cf-connecting-ip") ||
+    req.headers.get("x-real-ip") ||
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "unknown"
+  )
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders })
@@ -64,10 +73,49 @@ Deno.serve(async (req: Request) => {
     }
 
     const fingerprintHash = await sha256(deviceFingerprint)
+    const sourceHash = await sha256(clientSource(req))
+
+    async function recordAttempt(
+      success: boolean,
+      reason: string,
+      last4: string | null = null
+    ) {
+      await admin.from("activation_attempts").insert({
+        device_fingerprint_hash: fingerprintHash,
+        source_hash: sourceHash,
+        license_key_last4: last4,
+        success,
+        reason,
+      })
+    }
 
     if (action === "activate") {
+      const windowStart = new Date(Date.now() - 15 * 60 * 1000).toISOString()
+      const [deviceFails, sourceFails] = await Promise.all([
+        admin
+          .from("activation_attempts")
+          .select("id", { count: "exact", head: true })
+          .eq("device_fingerprint_hash", fingerprintHash)
+          .eq("success", false)
+          .gte("created_at", windowStart),
+        admin
+          .from("activation_attempts")
+          .select("id", { count: "exact", head: true })
+          .eq("source_hash", sourceHash)
+          .eq("success", false)
+          .gte("created_at", windowStart),
+      ])
+
+      if ((deviceFails.count ?? 0) >= 8 || (sourceFails.count ?? 0) >= 12) {
+        await recordAttempt(false, "rate_limited")
+        return json({
+          error: "Muitas tentativas. Aguarde alguns minutos e tente novamente.",
+          retryAfterSeconds: 900,
+        }, 429)
+      }
       const licenseKey = normalizeKey(String(body.licenseKey ?? ""))
       if (!licenseKey.startsWith("ALTIV-")) {
+        await recordAttempt(false, "invalid_format")
         return json({ error: "Chave inválida." }, 400)
       }
 
@@ -80,19 +128,23 @@ Deno.serve(async (req: Request) => {
         .maybeSingle()
 
       if (licenseError || !license) {
+        await recordAttempt(false, "invalid_key", licenseKey.slice(-4) || null)
         return json({ error: "Chave inválida." }, 401)
       }
 
       if (license.status === "blocked") {
+        await recordAttempt(false, "license_blocked", license.license_key_last4)
         return json({ error: "Licença bloqueada." }, 403)
       }
 
       if (license.status === "cancelled") {
+        await recordAttempt(false, "license_cancelled", license.license_key_last4)
         return json({ error: "Licença cancelada." }, 403)
       }
 
       const now = new Date()
       if (license.expires_at && new Date(license.expires_at) <= now) {
+        await recordAttempt(false, "license_expired", license.license_key_last4)
         return json({ error: "Licença vencida.", expiresAt: license.expires_at }, 403)
       }
 
@@ -111,6 +163,7 @@ Deno.serve(async (req: Request) => {
           .eq("is_active", true)
 
         if ((count ?? 0) >= license.max_devices) {
+          await recordAttempt(false, "device_limit", license.license_key_last4)
           return json({
             error: "Limite de dispositivos atingido.",
             maxDevices: license.max_devices,
@@ -165,6 +218,12 @@ Deno.serve(async (req: Request) => {
           app_version: appVersion,
         },
       })
+
+      await recordAttempt(
+        true,
+        existingDevice ? "reactivated" : "activated",
+        license.license_key_last4
+      )
 
       return json({
         ok: true,
