@@ -83,6 +83,44 @@ const emptyCounts: DashboardCounts = {
   devices: 0,
 }
 
+const eventLabels: Record<string, string> = {
+  license_created: 'Licença criada',
+  license_renewed: 'Licença renovada',
+  license_active: 'Licença ativada',
+  license_blocked: 'Licença bloqueada',
+  license_cancelled: 'Licença cancelada',
+  devices_reset: 'Dispositivos liberados',
+  device_activated: 'Dispositivo ativado',
+  device_reactivated: 'Dispositivo reativado',
+}
+
+function eventDetails(event: LicenseEvent) {
+  const metadata = event.metadata || {}
+  const parts: string[] = []
+
+  if (typeof metadata.plan === 'string') {
+    parts.push(`Plano: ${metadata.plan}`)
+  }
+
+  if (typeof metadata.duration_days === 'number') {
+    parts.push(`${metadata.duration_days} dias`)
+  }
+
+  if (typeof metadata.days === 'number') {
+    parts.push(`+${metadata.days} dias`)
+  }
+
+  if (typeof metadata.max_devices === 'number') {
+    parts.push(`${metadata.max_devices} dispositivo(s)`)
+  }
+
+  if (typeof metadata.device_label === 'string' && metadata.device_label) {
+    parts.push(`Aparelho: ${metadata.device_label}`)
+  }
+
+  return parts.length ? parts.join(' • ') : 'Sem detalhes adicionais'
+}
+
 export default function App() {
   const [session, setSession] = useState<any>(null)
   const [authMode, setAuthMode] = useState<AuthMode>('login')
@@ -636,8 +674,8 @@ export default function App() {
               {detailsBusy && <p>Carregando…</p>}
               {!detailsBusy && !licenseEvents.length && <p>Nenhum evento registrado.</p>}
               {!detailsBusy && licenseEvents.map(event => <div className="history-row" key={event.id}>
-                <div><strong>{event.event_type.replaceAll('_', ' ')}</strong><span>{new Date(event.created_at).toLocaleString('pt-BR')}</span></div>
-                <code>{Object.keys(event.metadata || {}).length ? JSON.stringify(event.metadata) : '—'}</code>
+                <div><strong>{eventLabels[event.event_type] || event.event_type.replaceAll('_', ' ')}</strong><span>{new Date(event.created_at).toLocaleString('pt-BR')}</span></div>
+                <span>{eventDetails(event)}</span>
               </div>)}
             </div>
           </section>
