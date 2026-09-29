@@ -148,86 +148,45 @@ Deno.serve(async (req: Request) => {
         return json({ error: "Licença vencida.", expiresAt: license.expires_at }, 403)
       }
 
-      const { data: existingDevice } = await admin
-        .from("devices")
-        .select("id, is_active")
-        .eq("license_id", license.id)
-        .eq("device_fingerprint_hash", fingerprintHash)
-        .maybeSingle()
-
-      if (!existingDevice?.is_active) {
-        const { count } = await admin
-          .from("devices")
-          .select("id", { count: "exact", head: true })
-          .eq("license_id", license.id)
-          .eq("is_active", true)
-
-        if ((count ?? 0) >= license.max_devices) {
-          await recordAttempt(false, "device_limit", license.license_key_last4)
-          return json({
-            error: "Limite de dispositivos atingido.",
-            maxDevices: license.max_devices,
-          }, 409)
-        }
-      }
-
       const token = makeToken()
       const tokenHash = await sha256(token)
       const nowIso = now.toISOString()
-
-      if (existingDevice) {
-        const { error } = await admin
-          .from("devices")
-          .update({
-            device_label: deviceLabel,
-            app_version: appVersion,
-            is_active: true,
-            revoked_at: null,
-            last_seen_at: nowIso,
-            activation_token_hash: tokenHash,
-            token_created_at: nowIso,
-          })
-          .eq("id", existingDevice.id)
-
-        if (error) return json({ error: "Falha ao ativar dispositivo." }, 500)
-      } else {
-        const { error } = await admin
-          .from("devices")
-          .insert({
-            license_id: license.id,
-            device_fingerprint_hash: fingerprintHash,
-            device_label: deviceLabel,
-            app_version: appVersion,
-            first_seen_at: nowIso,
-            last_seen_at: nowIso,
-            is_active: true,
-            activation_token_hash: tokenHash,
-            token_created_at: nowIso,
-          })
-
-        if (error) return json({ error: "Falha ao vincular dispositivo." }, 500)
-      }
+      const { data: transfer, error: transferError } = await admin.rpc(
+        "transfer_license_device",
+        {
+          p_license_id: license.id,
+          p_fingerprint_hash: fingerprintHash,
+          p_token_hash: tokenHash,
+          p_device_label: deviceLabel,
+          p_app_version: appVersion,
+        }
+      )
+      if (transferError) return json({ error: "Falha ao transferir licença para este dispositivo." }, 500)
+      const replacedCount = Number(transfer?.replacedCount ?? 0)
+      const reactivated = Boolean(transfer?.reactivated)
 
       await admin.from("license_events").insert({
         license_id: license.id,
         customer_id: license.customer_id,
         admin_user_id: null,
-        event_type: existingDevice ? "device_reactivated" : "device_activated",
+        event_type: reactivated ? "device_reactivated" : "device_activated",
         metadata: {
           device_label: deviceLabel,
           app_version: appVersion,
+          replaced_count: replacedCount,
         },
       })
 
       await recordAttempt(
         true,
-        existingDevice ? "reactivated" : "activated",
+        reactivated ? "reactivated" : "activated",
         license.license_key_last4
       )
 
       return json({
         ok: true,
         activationToken: token,
+        replacedCount,
         license: {
           status: "active",
           expiresAt: license.expires_at,
@@ -252,7 +211,7 @@ Deno.serve(async (req: Request) => {
         .maybeSingle()
 
       if (deviceError || !device || !device.is_active) {
-        return json({ error: "Ativação inválida." }, 401)
+        return json({ error: "Esta ativação não está mais ativa. Digite a chave para ativar neste dispositivo." }, 401)
       }
 
       const { data: license } = await admin
@@ -305,7 +264,7 @@ Deno.serve(async (req: Request) => {
         .maybeSingle()
 
       if (deviceError || !device || !device.is_active) {
-        return json({ error: "Ativação inválida." }, 401)
+        return json({ error: "Esta ativação não está mais ativa. Digite a chave para ativar neste dispositivo." }, 401)
       }
 
       const { data: license } = await admin
