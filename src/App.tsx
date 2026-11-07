@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import { supabase, supabaseConfigured } from './lib/supabase'
 
-type AuthMode = 'login' | 'signup'
+type AuthMode = 'login' | 'signup' | 'recover' | 'reset'
 type Page = 'dashboard' | 'licenses' | 'customers' | 'plans' | 'history' | 'activation'
 
 type DashboardCounts = {
@@ -144,10 +144,14 @@ function eventDetails(event: LicenseEvent) {
 
 export default function App() {
   const [session, setSession] = useState<any>(null)
-  const [authMode, setAuthMode] = useState<AuthMode>('login')
+  const [authMode, setAuthMode] = useState<AuthMode>(() => (
+    new URLSearchParams(window.location.search).get('recovery') === '1' ? 'reset' : 'login'
+  ))
   const [page, setPage] = useState<Page>('dashboard')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [checkingAdmin, setCheckingAdmin] = useState(true)
@@ -215,7 +219,11 @@ export default function App() {
       if (!data.session) setCheckingAdmin(false)
     })
 
-    const { data } = supabase.auth.onAuthStateChange((_event, next) => {
+    const { data } = supabase.auth.onAuthStateChange((event, next) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        setAuthMode('reset')
+        setMessage('Defina uma nova senha para recuperar seu acesso.')
+      }
       setSession(next)
       if (!next) {
         setIsAdmin(false)
@@ -227,9 +235,9 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!session || !supabase) return
+    if (!session || !supabase || authMode === 'reset') return
     verifyAdmin()
-  }, [session])
+  }, [session, authMode])
 
   async function verifyAdmin() {
     if (!supabase || !session) return
@@ -359,6 +367,53 @@ export default function App() {
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     setBusy(false)
     if (error) setMessage(error.message)
+  }
+
+  async function requestPasswordRecovery(event: FormEvent) {
+    event.preventDefault()
+    if (!supabase || !email.trim()) return
+    setBusy(true)
+    setMessage('')
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: `${window.location.origin}/?recovery=1`,
+    })
+    setBusy(false)
+    if (error) {
+      setMessage('Não foi possível enviar o link. Verifique o e-mail, a configuração de envio ou tente mais tarde.')
+      return
+    }
+    // Do not reveal whether an email is registered.
+    setMessage('Se este e-mail tiver uma conta, você receberá um link para redefinir a senha. Confira também o spam.')
+  }
+
+  async function saveRecoveredPassword(event: FormEvent) {
+    event.preventDefault()
+    if (!supabase) return
+    if (newPassword.length < 12 || newPassword.length > 128) {
+      setMessage('A nova senha deve conter entre 12 e 128 caracteres.')
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setMessage('As senhas informadas não coincidem.')
+      return
+    }
+    setBusy(true)
+    setMessage('')
+    const { error } = await supabase.auth.updateUser({ password: newPassword })
+    if (error) {
+      setBusy(false)
+      setMessage('Link inválido ou expirado. Solicite uma nova recuperação de senha.')
+      return
+    }
+    await supabase.auth.signOut()
+    setBusy(false)
+    setPassword('')
+    setNewPassword('')
+    setConfirmPassword('')
+    setAuthMode('login')
+    // Clean up the recovery query param from the address bar.
+    window.history.replaceState(null, '', window.location.pathname)
+    setMessage('Senha atualizada! Entre novamente com seu e-mail e a nova senha.')
   }
 
   async function createCustomer(event: FormEvent) {
@@ -837,24 +892,60 @@ export default function App() {
     return <main className="center-shell"><section className="login-card"><h1>Supabase não configurado</h1></section></main>
   }
 
-  if (checkingAdmin && session) {
+  if (checkingAdmin && session && authMode !== 'reset') {
     return <main className="center-shell"><section className="login-card"><h1>Validando administrador…</h1></section></main>
   }
 
-  if (!session || !isAdmin) {
+  if (!session || !isAdmin || authMode === 'reset') {
     return (
       <main className="center-shell">
-        <form className="login-card" onSubmit={submitAuth}>
+        <form className="login-card" onSubmit={
+          authMode === 'recover' ? requestPasswordRecovery :
+            authMode === 'reset' ? saveRecoveredPassword : submitAuth
+        }>
           <div className="brand"><div className="logo">A</div><div><strong>ALTIV ADMIN</strong><span>Painel de licenças</span></div></div>
-          <h1>{authMode === 'login' ? 'Acesso administrativo' : 'Criar primeiro acesso'}</h1>
-          <p>{authMode === 'login' ? 'Entre com seu e-mail e senha.' : 'Use um e-mail previamente autorizado.'}</p>
-          <label>E-mail<input value={email} onChange={e => setEmail(e.target.value)} type="email" required /></label>
-          <label>Senha<input value={password} onChange={e => setPassword(e.target.value)} type="password" minLength={8} required /></label>
-          {message && <div className="alert">{message}</div>}
-          <button disabled={busy}>{busy ? 'Aguarde…' : authMode === 'login' ? 'Entrar' : 'Criar acesso'}</button>
-          <button type="button" className="auth-switch" onClick={() => { setMessage(''); setAuthMode(authMode === 'login' ? 'signup' : 'login') }}>
-            {authMode === 'login' ? 'Primeiro acesso? Criar senha' : 'Já tenho acesso? Entrar'}
-          </button>
+          <h1>{authMode === 'login' ? 'Acesso administrativo' :
+            authMode === 'signup' ? 'Criar primeiro acesso' :
+              authMode === 'recover' ? 'Recuperar senha' : 'Definir nova senha'}</h1>
+          <p>{authMode === 'login' ? 'Entre com seu e-mail e senha.' :
+            authMode === 'signup' ? 'Use um e-mail previamente autorizado.' :
+              authMode === 'recover' ? 'Enviaremos um link de recuperação ao e-mail cadastrado.' :
+                'Escolha uma nova senha para esta conta.'}</p>
+          {authMode !== 'reset' && (
+            <label>E-mail<input value={email} onChange={e => setEmail(e.target.value)}
+              type="email" autoComplete="email" required /></label>
+          )}
+          {(authMode === 'login' || authMode === 'signup') && (
+            <label>Senha<input value={password} onChange={e => setPassword(e.target.value)}
+              type="password" autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
+              minLength={8} required /></label>
+          )}
+          {authMode === 'reset' && <>
+            <label>Nova senha<input value={newPassword} onChange={e => setNewPassword(e.target.value)}
+              type="password" autoComplete="new-password" minLength={12} maxLength={128} required /></label>
+            <label>Confirme a nova senha<input value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)}
+              type="password" autoComplete="new-password" minLength={12} maxLength={128} required /></label>
+          </>}
+          {message && <div className="alert" role="status">{message}</div>}
+          <button disabled={busy}>{busy ? 'Aguarde…' :
+            authMode === 'login' ? 'Entrar' :
+              authMode === 'signup' ? 'Criar acesso' :
+                authMode === 'recover' ? 'Enviar link de recuperação' : 'Salvar nova senha'}</button>
+          {authMode === 'login' && <>
+            <button type="button" className="auth-switch" onClick={() => { setMessage(''); setAuthMode('recover') }}>
+              Esqueci minha senha
+            </button>
+            <button type="button" className="auth-switch" onClick={() => { setMessage(''); setAuthMode('signup') }}>
+              Primeiro acesso? Criar senha
+            </button>
+          </>}
+          {authMode === 'signup' && <button type="button" className="auth-switch"
+            onClick={() => { setMessage(''); setAuthMode('login') }}>Já tenho acesso? Entrar</button>}
+          {authMode === 'recover' && <button type="button" className="auth-switch"
+            onClick={() => { setMessage(''); setAuthMode('login') }}>Voltar ao login</button>}
+          {authMode === 'reset' && !session && <p>
+            Link ainda não validado. Abra o link enviado ao seu e-mail ou solicite uma nova recuperação.
+          </p>}
         </form>
       </main>
     )
